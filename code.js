@@ -97,66 +97,64 @@ function getTextColor(node) {
   return null;
 }
 
-// Determines the effective background color behind a text node.
-// At each level of the ancestor chain, composites in order:
-//   1. The frame's own fill (the "floor" of the container)
-//   2. The nearest visible sibling layer below the text in z-order
-//      (highest index that is still below the text — no bounds check needed)
-// Processes outermost→innermost so inner layers composite on top.
+// Walk up from the text node looking for the nearest visible background.
+// At each level: check the nearest sibling below first, then the parent's own fill.
 // Returns { color } or "skip" if a non-solid fill is encountered.
 function getBackgroundColor(textNode) {
-  // Build ancestor chain outermost-first, tracking the child on the path to text
-  var ancestors = [], childOnPath = [];
-  var cur = textNode, parent = textNode.parent;
+  var cur = textNode;
+  var parent = textNode.parent;
+
   while (parent && parent.type !== "PAGE" && parent.type !== "DOCUMENT") {
-    ancestors.unshift(parent);
-    childOnPath.unshift(cur);
+
+    // 1. Find the nearest visible sibling below `cur` in this parent.
+    //    children[] is bottom→top (index 0 = lowest layer).
+    if (parent.children) {
+      var curIdx = -1;
+      for (var i = 0; i < parent.children.length; i++) {
+        if (parent.children[i] === cur) { curIdx = i; break; }
+      }
+      for (var si = curIdx - 1; si >= 0; si--) {
+        var sib = parent.children[si];
+        if (!sib.visible) continue;
+        // Visible sibling — check its fill
+        var sibFill = topSolidFill(sib);
+        if (sibFill === "skip") return "skip";
+        if (sibFill !== null) {
+          var a = sibFill.opacity * (sib.opacity !== undefined ? sib.opacity : 1);
+          return { color: composite(sibFill.color, a, { r: 1, g: 1, b: 1 }) };
+        }
+        // Visible but transparent (no fills) — keep looking below
+      }
+    }
+
+    // 2. Parent's own fill
+    var parentFill = topSolidFill(parent);
+    if (parentFill === "skip") return "skip";
+    if (parentFill !== null) {
+      var pa = parentFill.opacity * (parent.opacity !== undefined ? parent.opacity : 1);
+      return { color: composite(parentFill.color, pa, { r: 1, g: 1, b: 1 }) };
+    }
+
+    // Nothing at this level — go up
     cur = parent;
     parent = parent.parent;
   }
 
-  var bg = { r: 1, g: 1, b: 1 }; // white canvas
+  return { color: { r: 1, g: 1, b: 1 } }; // white canvas default
+}
 
-  for (var ai = 0; ai < ancestors.length; ai++) {
-    var a = ancestors[ai];
-    var aAlpha = a.opacity !== undefined ? a.opacity : 1;
-    var child = childOnPath[ai];
-
-    // 1. Frame's own fill — the background color of the container itself
-    if ("fills" in a && a.fills !== figma.mixed && Array.isArray(a.fills)) {
-      for (var fi = 0; fi < a.fills.length; fi++) {
-        var f = a.fills[fi];
-        if (f.visible === false) continue;
-        if (f.type !== "SOLID") return "skip";
-        bg = composite(f.color, (f.opacity !== undefined ? f.opacity : 1) * aAlpha, bg);
-      }
-    }
-
-    // 2. Nearest visible sibling below `child` in this frame.
-    //    children[] is ordered bottom→top (index 0 = lowest), so walk downward
-    //    from just below `child` and take the first visible layer with fills.
-    if (a.children) {
-      var childIdx = a.children.indexOf(child);
-      for (var si = childIdx - 1; si >= 0; si--) {
-        var sib = a.children[si];
-        if (!sib.visible) continue;
-        if (!("fills" in sib) || sib.fills === figma.mixed ||
-            !Array.isArray(sib.fills) || sib.fills.length === 0) continue;
-
-        // Nearest visible layer with fills found — composite it and stop
-        var sAlpha = sib.opacity !== undefined ? sib.opacity : 1;
-        for (var sfi = 0; sfi < sib.fills.length; sfi++) {
-          var sf = sib.fills[sfi];
-          if (sf.visible === false) continue;
-          if (sf.type !== "SOLID") return "skip";
-          bg = composite(sf.color, (sf.opacity !== undefined ? sf.opacity : 1) * sAlpha, bg);
-        }
-        break; // only the nearest layer matters
-      }
-    }
+// Returns { color, opacity } for the topmost visible fill on a node,
+// "skip" if the topmost visible fill is non-solid, or null if no visible fills.
+function topSolidFill(node) {
+  if (!("fills" in node) || node.fills === figma.mixed || !Array.isArray(node.fills)) return null;
+  // fills[] is bottom→top; iterate in reverse to get topmost first
+  for (var i = node.fills.length - 1; i >= 0; i--) {
+    var f = node.fills[i];
+    if (f.visible === false) continue;
+    if (f.type !== "SOLID") return "skip";
+    return { color: f.color, opacity: f.opacity !== undefined ? f.opacity : 1 };
   }
-
-  return { color: bg };
+  return null;
 }
 
 // ─── Per-node check ───────────────────────────────────────────────────────────
