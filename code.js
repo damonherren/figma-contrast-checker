@@ -97,32 +97,84 @@ function getTextColor(node) {
   return null;
 }
 
-// Walks the ancestor chain (outermost → innermost) and composites all solid fills
-// over a white canvas to determine the effective background behind the text node.
-// Returns { color } or the string "skip" if a non-solid fill is encountered.
-function getBackgroundColor(node) {
-  // Collect ancestors outermost-first so inner fills composite last (and win)
-  var ancestors = [], n = node.parent;
-  while (n && n.type !== "PAGE" && n.type !== "DOCUMENT") {
-    ancestors.unshift(n);
-    n = n.parent;
+// Determines the effective background color behind a text node by walking the
+// full ancestor chain and, at each level, collecting:
+//   1. The ancestor frame's own solid fills
+//   2. Any sibling layers that are stacked BELOW the text (lower z-index) and
+//      whose bounds cover the text — the most common real-world case
+// All collected layers are composited outermost→innermost over a white canvas.
+// Returns { color } or "skip" if a non-solid fill is encountered.
+function getBackgroundColor(textNode) {
+  var textBounds = textNode.absoluteBoundingBox;
+
+  // Build ancestor chain outermost-first, tracking which child at each level
+  // is on the path toward the text node.
+  var ancestors = [], childOnPath = [];
+  var cur = textNode, anc = textNode.parent;
+  while (anc && anc.type !== "PAGE" && anc.type !== "DOCUMENT") {
+    ancestors.unshift(anc);
+    childOnPath.unshift(cur);
+    cur = anc;
+    anc = anc.parent;
   }
 
-  var bg = { r: 1, g: 1, b: 1 }; // Figma canvas defaults to white
+  // Collect background paint layers in visual stacking order (bottom → top)
+  var layers = [];
 
   for (var ai = 0; ai < ancestors.length; ai++) {
-    var anc = ancestors[ai];
-    if (!("fills" in anc) || anc.fills === figma.mixed || !Array.isArray(anc.fills)) continue;
-    var nodeAlpha = anc.opacity !== undefined ? anc.opacity : 1;
-    for (var fi = 0; fi < anc.fills.length; fi++) {
-      var f = anc.fills[fi];
-      if (f.visible === false) continue;
-      if (f.type !== "SOLID") return "skip"; // gradient/image background
-      bg = composite(f.color, (f.opacity !== undefined ? f.opacity : 1) * nodeAlpha, bg);
+    var a = ancestors[ai];
+    var aAlpha = a.opacity !== undefined ? a.opacity : 1;
+    var child = childOnPath[ai];
+
+    // 1. The ancestor frame's own fills sit behind everything inside it
+    if ("fills" in a && a.fills !== figma.mixed && Array.isArray(a.fills)) {
+      for (var fi = 0; fi < a.fills.length; fi++) {
+        var f = a.fills[fi];
+        if (f.visible === false) continue;
+        if (f.type !== "SOLID") return "skip";
+        layers.push({ color: f.color, alpha: (f.opacity !== undefined ? f.opacity : 1) * aAlpha });
+      }
+    }
+
+    // 2. Sibling layers below `child` that cover the text bounds.
+    //    In Figma children[] is ordered bottom→top (index 0 = lowest layer).
+    if (a.children) {
+      var childIdx = a.children.indexOf(child);
+      for (var si = 0; si < childIdx; si++) {
+        var sib = a.children[si];
+        if (!sib.visible) continue;
+        if (!("fills" in sib) || sib.fills === figma.mixed || !Array.isArray(sib.fills) || sib.fills.length === 0) continue;
+        if (!covers(sib.absoluteBoundingBox, textBounds)) continue;
+
+        var sAlpha = sib.opacity !== undefined ? sib.opacity : 1;
+        for (var sfi = 0; sfi < sib.fills.length; sfi++) {
+          var sf = sib.fills[sfi];
+          if (sf.visible === false) continue;
+          if (sf.type !== "SOLID") return "skip";
+          layers.push({ color: sf.color, alpha: (sf.opacity !== undefined ? sf.opacity : 1) * sAlpha });
+        }
+      }
     }
   }
 
+  // Composite all collected layers over the white canvas
+  var bg = { r: 1, g: 1, b: 1 };
+  for (var li = 0; li < layers.length; li++) {
+    bg = composite(layers[li].color, layers[li].alpha, bg);
+  }
+
   return { color: bg };
+}
+
+// Returns true if `container` bounds fully cover `target` bounds (±2px tolerance).
+function covers(container, target) {
+  if (!target) return false;
+  if (!container) return true;
+  var t = 2;
+  return container.x     <= target.x + t &&
+         container.y     <= target.y + t &&
+         container.x + container.width  >= target.x + target.width  - t &&
+         container.y + container.height >= target.y + target.height - t;
 }
 
 // ─── Per-node check ───────────────────────────────────────────────────────────
