@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Contrast Checker</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    color: #1e1e1e;
+    background: #fff;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  .header {
+    padding: 12px 16px;
+    border-bottom: 1px solid #eee;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+  .header h2 { font-size: 13px; font-weight: 600; }
+  .header-actions { display: flex; gap: 8px; align-items: center; }
+
+  button {
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    border: none;
+    transition: background 0.15s;
+  }
+  .btn-scan { background: #18a0fb; color: #fff; }
+  .btn-scan:hover { background: #0d8de3; }
+  .btn-scan:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-close { background: #f0f0f0; color: #444; }
+  .btn-close:hover { background: #e0e0e0; }
+
+  /* ── States ── */
+  .state { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+  .state.visible { display: flex; }
+
+  .empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: #888;
+    padding: 32px;
+    text-align: center;
+  }
+  .empty-state .icon { font-size: 36px; line-height: 1; }
+  .empty-state .title { font-size: 12px; color: #555; }
+  .empty-state .hint { font-size: 11px; color: #aaa; line-height: 1.6; }
+
+  .loading-state {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: #888;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid #ddd;
+    border-top-color: #18a0fb;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+
+  .error-state {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    color: #c0392b;
+    font-size: 11px;
+    text-align: center;
+  }
+
+  /* ── All-clear ── */
+  .all-clear {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: #1a9e56;
+    font-weight: 600;
+  }
+  .all-clear .icon { font-size: 36px; }
+  .all-clear .sub { font-size: 11px; color: #888; font-weight: 400; }
+
+  /* ── Summary bar ── */
+  .summary {
+    padding: 10px 16px;
+    border-bottom: 1px solid #eee;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+  }
+  .summary-total { font-size: 12px; font-weight: 600; color: #1e1e1e; margin-right: 4px; }
+  .summary-meta  { font-size: 11px; color: #aaa; margin-left: auto; }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: opacity 0.15s;
+    user-select: none;
+  }
+  .chip:hover { opacity: 0.8; }
+  .chip.active { border-color: currentColor; }
+  .chip-normal { background: #fff0ee; color: #c0392b; }
+  .chip-large  { background: #fff8e6; color: #8a6100; }
+
+  /* ── Results list ── */
+  .results { flex: 1; overflow-y: auto; padding-bottom: 8px; }
+
+  .issue-row {
+    display: grid;
+    grid-template-columns: 1fr 118px;
+    align-items: start;
+    gap: 12px;
+    padding: 8px 16px;
+    border-bottom: 1px solid #f2f2f2;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .issue-row:hover { background: #f7f9ff; }
+  .issue-row:hover .issue-path { color: #18a0fb; }
+
+  /* Left column */
+  .issue-left { min-width: 0; }
+
+  .issue-path {
+    font-size: 11px;
+    color: #888;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: color 0.1s;
+  }
+
+  .issue-text {
+    font-size: 12px;
+    font-style: italic;
+    color: #444;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 2px;
+  }
+
+  .issue-meta {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    color: #aaa;
+    margin-top: 3px;
+  }
+
+  .badge-large {
+    display: inline-block;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: #fff8e6;
+    color: #8a6100;
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  /* Right column */
+  .issue-right {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 3px;
+  }
+
+  .color-pair { display: flex; flex-direction: column; gap: 2px; }
+
+  .color-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    justify-content: flex-end;
+  }
+  .color-hex {
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 10px;
+    color: #555;
+  }
+  .color-swatch {
+    width: 11px;
+    height: 11px;
+    border-radius: 2px;
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    flex-shrink: 0;
+  }
+
+  .ratio-value {
+    font-size: 13px;
+    font-weight: 700;
+    color: #c0392b;
+    margin-top: 3px;
+    letter-spacing: -0.01em;
+  }
+  .ratio-required {
+    font-size: 10px;
+    color: #aaa;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h2>Contrast Checker</h2>
+  <div class="header-actions">
+    <button class="btn-scan" id="scanBtn">Scan Page</button>
+    <button class="btn-close" id="closeBtn">Close</button>
+  </div>
+</div>
+
+<!-- Idle -->
+<div class="state visible" id="stateIdle">
+  <div class="empty-state">
+    <div class="icon">◑</div>
+    <div class="title">Scan for WCAG AA contrast failures on text layers.</div>
+    <div class="hint">
+      Normal text requires 4.5:1<br>
+      Large text (18px+ or 14px+ bold) requires 3:1<br><br>
+      Text on gradients, images, or with mixed font sizes is skipped.
+    </div>
+  </div>
+</div>
+
+<!-- Loading -->
+<div class="state" id="stateLoading">
+  <div class="loading-state"><div class="spinner"></div>Scanning…</div>
+</div>
+
+<!-- Error -->
+<div class="state" id="stateError">
+  <div class="error-state" id="errorMsg"></div>
+</div>
+
+<!-- All-clear -->
+<div class="state" id="stateAllClear">
+  <div class="all-clear">
+    <div class="icon">✓</div>
+    <div>No contrast issues found</div>
+    <div class="sub" id="allClearSub"></div>
+  </div>
+</div>
+
+<!-- Results -->
+<div class="state" id="stateResults">
+  <div class="summary" id="summary"></div>
+  <div class="results" id="results"></div>
+</div>
+
+<script>
+  var scanBtn   = document.getElementById("scanBtn");
+  var closeBtn  = document.getElementById("closeBtn");
+  var allIssues = [];
+  var activeFilter = null;
+
+  // ── State management ────────────────────────────────────────────────────────
+  function showState(id) {
+    ["stateIdle","stateLoading","stateError","stateAllClear","stateResults"].forEach(function (s) {
+      document.getElementById(s).classList.toggle("visible", s === id);
+    });
+  }
+
+  // ── Controls ─────────────────────────────────────────────────────────────────
+  scanBtn.addEventListener("click", function () {
+    showState("stateLoading");
+    scanBtn.disabled = true;
+    parent.postMessage({ pluginMessage: { type: "scan" } }, "*");
+  });
+
+  closeBtn.addEventListener("click", function () {
+    parent.postMessage({ pluginMessage: { type: "close" } }, "*");
+  });
+
+  // ── Receive results ──────────────────────────────────────────────────────────
+  window.onmessage = function (event) {
+    var msg = event.data.pluginMessage;
+    if (!msg) return;
+    scanBtn.disabled = false;
+
+    if (msg.type === "error") {
+      document.getElementById("errorMsg").textContent = msg.message;
+      showState("stateError");
+      return;
+    }
+    if (msg.type !== "results") return;
+
+    allIssues    = msg.issues  || [];
+    activeFilter = null;
+
+    if (allIssues.length === 0) {
+      var sub = msg.checked + " text layer" + (msg.checked !== 1 ? "s" : "") + " passed";
+      if (msg.skipped > 0) sub += " · " + msg.skipped + " skipped";
+      document.getElementById("allClearSub").textContent = sub;
+      showState("stateAllClear");
+      return;
+    }
+
+    renderSummary(msg.checked, msg.skipped);
+    renderResults();
+    showState("stateResults");
+  };
+
+  // ── Summary bar ──────────────────────────────────────────────────────────────
+  function renderSummary(checked, skipped) {
+    var normalCount = allIssues.filter(function (i) { return !i.large; }).length;
+    var largeCount  = allIssues.filter(function (i) { return  i.large; }).length;
+    var passed      = checked - allIssues.length;
+
+    var html = '<span class="summary-total">'
+      + allIssues.length + " issue" + (allIssues.length !== 1 ? "s" : "") + "</span>";
+
+    if (normalCount > 0) {
+      html += '<span class="chip chip-normal" data-filter="normal">'
+        + "Normal <strong>" + normalCount + "</strong></span>";
+    }
+    if (largeCount > 0) {
+      html += '<span class="chip chip-large" data-filter="large">'
+        + "Large text <strong>" + largeCount + "</strong></span>";
+    }
+
+    var meta = passed + " passed";
+    if (skipped > 0) meta += " · " + skipped + " skipped";
+    html += '<span class="summary-meta">' + meta + "</span>";
+
+    var el = document.getElementById("summary");
+    el.innerHTML = html;
+
+    el.querySelectorAll(".chip").forEach(function (chip) {
+      chip.addEventListener("click", function () {
+        var f = chip.getAttribute("data-filter");
+        activeFilter = activeFilter === f ? null : f;
+        el.querySelectorAll(".chip").forEach(function (c) {
+          c.classList.toggle("active", c.getAttribute("data-filter") === activeFilter);
+        });
+        renderResults();
+      });
+    });
+  }
+
+  // ── Issue list ────────────────────────────────────────────────────────────────
+  function renderResults() {
+    var visible = activeFilter
+      ? allIssues.filter(function (i) { return activeFilter === "large" ? i.large : !i.large; })
+      : allIssues;
+
+    // Worst failures first
+    visible = visible.slice().sort(function (a, b) { return a.ratio - b.ratio; });
+
+    var html = "";
+    visible.forEach(function (issue) {
+      var metaText = issue.fontSize + "px";
+      if (issue.fontStyle && issue.fontStyle.toLowerCase() !== "regular") {
+        metaText += " " + issue.fontStyle;
+      }
+      var metaHtml = escHtml(metaText);
+      if (issue.large) {
+        metaHtml += ' <span class="badge-large">Large Text</span>';
+      }
+
+      html += '<div class="issue-row" data-id="' + escHtml(issue.nodeId) + '">'
+
+        // Left
+        + '<div class="issue-left">'
+        + '<div class="issue-path">'  + escHtml(issue.nodePath)    + "</div>"
+        + '<div class="issue-text">\u201c' + escHtml(issue.textPreview) + '\u201d</div>'
+        + '<div class="issue-meta">'  + metaHtml                   + "</div>"
+        + "</div>"
+
+        // Right
+        + '<div class="issue-right">'
+        + '<div class="color-pair">'
+        + '<div class="color-row">'
+        + '<span class="color-hex">' + escHtml(issue.fgHex) + "</span>"
+        + '<span class="color-swatch" style="background:' + escHtml(issue.fgHex) + '"></span>'
+        + "</div>"
+        + '<div class="color-row">'
+        + '<span class="color-hex">' + escHtml(issue.bgHex) + "</span>"
+        + '<span class="color-swatch" style="background:' + escHtml(issue.bgHex) + '"></span>'
+        + "</div>"
+        + "</div>"
+        + '<div class="ratio-value">' + issue.ratio + ":1</div>"
+        + '<div class="ratio-required">need ' + issue.required + ":1</div>"
+        + "</div>"
+
+        + "</div>";
+    });
+
+    var el = document.getElementById("results");
+    el.innerHTML = html;
+
+    el.querySelectorAll(".issue-row").forEach(function (row) {
+      row.addEventListener("click", function () {
+        parent.postMessage({ pluginMessage: { type: "select", nodeId: row.getAttribute("data-id") } }, "*");
+      });
+    });
+  }
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+</script>
+</body>
+</html>
