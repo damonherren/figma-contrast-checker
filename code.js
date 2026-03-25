@@ -104,7 +104,7 @@ function getBackgroundColor(textNode) {
   var cur = textNode;
   var parent = textNode.parent;
 
-  while (parent && parent.type !== "PAGE" && parent.type !== "DOCUMENT") {
+  while (parent && parent.type !== "DOCUMENT") {
 
     // 1. Find the nearest visible sibling below `cur` in this parent.
     //    children[] is bottom→top (index 0 = lowest layer).
@@ -113,17 +113,20 @@ function getBackgroundColor(textNode) {
       for (var i = 0; i < parent.children.length; i++) {
         if (parent.children[i] === cur) { curIdx = i; break; }
       }
+      var textBounds = textNode.absoluteBoundingBox;
       for (var si = curIdx - 1; si >= 0; si--) {
         var sib = parent.children[si];
         if (!sib.visible) continue;
-        // Visible sibling — check its fill
+        // Skip siblings that don't overlap the text's position
+        if (!boundsOverlap(sib.absoluteBoundingBox, textBounds)) continue;
+        // Overlapping visible sibling — check its fill
         var sibFill = topSolidFill(sib);
         if (sibFill === "skip") return "skip";
         if (sibFill !== null) {
           var a = sibFill.opacity * (sib.opacity !== undefined ? sib.opacity : 1);
           return { color: composite(sibFill.color, a, { r: 1, g: 1, b: 1 }) };
         }
-        // Visible but transparent (no fills) — keep looking below
+        // Overlapping and visible but no fills — keep looking below
       }
     }
 
@@ -141,6 +144,15 @@ function getBackgroundColor(textNode) {
   }
 
   return { color: { r: 1, g: 1, b: 1 } }; // white canvas default
+}
+
+// Returns true if two bounding boxes overlap.
+function boundsOverlap(a, b) {
+  if (!a || !b) return true; // no bounds info — assume overlap
+  return !(a.x + a.width  <= b.x ||
+           b.x + b.width  <= a.x ||
+           a.y + a.height <= b.y ||
+           b.y + b.height <= a.y);
 }
 
 // Returns { color, opacity } for the topmost visible fill on a node,
