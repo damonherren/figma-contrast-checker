@@ -198,6 +198,16 @@ function computeContrastResult(node, fgResult, bg) {
 
 // ─── Scan ─────────────────────────────────────────────────────────────────────
 
+// Returns true if the node or any ancestor up to (but not including) the page is hidden.
+function isEffectivelyHidden(node) {
+  var n = node;
+  while (n && n.type !== "PAGE" && n.type !== "DOCUMENT") {
+    if (!n.visible || n.opacity === 0) return true;
+    n = n.parent;
+  }
+  return false;
+}
+
 async function scan() {
   var issues = [], checked = 0, skipped = 0;
   var allTextNodes = figma.currentPage.findAll(function (n) { return n.type === "TEXT"; });
@@ -206,7 +216,7 @@ async function scan() {
   var candidates = [];
   for (var i = 0; i < allTextNodes.length; i++) {
     var node = allTextNodes[i];
-    if (!node.visible || node.opacity === 0) { checked++; continue; }
+    if (isEffectivelyHidden(node)) { checked++; continue; }
     if (node.fontSize === figma.mixed)        { skipped++; continue; }
     var fgResult = getTextColor(node);
     if (fgResult === null)   { checked++; continue; } // no fill → decoration
