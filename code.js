@@ -104,103 +104,92 @@ function getTextColor(node) {
   return null;
 }
 
-// ─── Page-level background detection ─────────────────────────────────────────
+// ─── Background node detection ────────────────────────────────────────────────
 
-// Returns true if two bounding boxes overlap.
-function boundsOverlap(a, b) {
-  if (!a || !b) return true;
-  return !(a.x + a.width  <= b.x ||
-           b.x + b.width  <= a.x ||
-           a.y + a.height <= b.y ||
-           b.y + b.height <= a.y);
-}
-
-// Returns { color, opacity } for the topmost visible solid fill on a node,
-// "skip" if the topmost visible fill is non-solid, or null if no visible fills.
-function topSolidFill(node) {
-  if (!("fills" in node) || node.fills === figma.mixed || !Array.isArray(node.fills)) return null;
-  for (var i = node.fills.length - 1; i >= 0; i--) {
-    var f = node.fills[i];
-    if (f.visible === false) continue;
-    if (f.type !== "SOLID") return "skip";
-    return { color: f.color, opacity: f.opacity !== undefined ? f.opacity : 1 };
+// Returns the nearest ancestor of `node` that has at least one visible fill,
+// or null if none found before reaching the page.
+// Exporting this node (with text hidden) and sampling the pixel at the text's
+// center gives the true visual background — unaffected by sibling overlays in
+// larger parent frames.
+function getNearestFilledAncestor(node) {
+  var cur = node.parent;
+  while (cur && cur.type !== "PAGE" && cur.type !== "DOCUMENT") {
+    var f = cur.fills;
+    if (f && f !== figma.mixed && Array.isArray(f)) {
+      for (var i = f.length - 1; i >= 0; i--) {
+        if (f[i].visible !== false) return cur;
+      }
+    }
+    cur = cur.parent;
   }
   return null;
 }
 
-// For text nodes sitting directly on the page (no parent frame), scan overlapping
-// page-level siblings below the text in z-order to find the background color.
-// Returns { r, g, b } or "skip" if a non-solid fill is encountered.
-function getPageBackground(textNode) {
-  var children = figma.currentPage.children;
+// For text with no filled ancestor (sitting directly on the canvas), find the
+// nearest overlapping page-level node below it in z-order.
+// In the Figma API children[] is back-to-front (index 0 = furthest back).
+function getPageBackgroundNode(textNode) {
   var textBounds = textNode.absoluteBoundingBox;
-  var curIdx = -1;
-  for (var i = 0; i < children.length; i++) {
-    if (children[i] === textNode) { curIdx = i; break; }
-  }
-  for (var si = curIdx - 1; si >= 0; si--) {
-    var sib = children[si];
-    if (!sib.visible) continue;
-    if (!boundsOverlap(sib.absoluteBoundingBox, textBounds)) continue;
-    var sibFill = topSolidFill(sib);
-    if (sibFill === "skip") return "skip";
-    if (sibFill !== null) {
-      var a = sibFill.opacity * (sib.opacity !== undefined ? sib.opacity : 1);
-      return composite(sibFill.color, a, { r: 1, g: 1, b: 1 });
-    }
-  }
-  return { r: 1, g: 1, b: 1 }; // white canvas default
-}
-
-// ─── Frame traversal ──────────────────────────────────────────────────────────
-
-// Returns the outermost ancestor frame whose bounds contain the text node's center,
-// or null if the node sits directly on the page or no enclosing frame contains it.
-// Using the outermost *containing* frame (rather than the absolute top-level frame)
-// handles overflow: text that spills below a clipped frame still gets sampled correctly.
-function getExportFrame(node) {
-  var textBounds = node.absoluteBoundingBox;
   if (!textBounds) return null;
   var cx = textBounds.x + textBounds.width / 2;
   var cy = textBounds.y + textBounds.height / 2;
-  var best = null;
-  var cur = node.parent;
-  while (cur && cur.type !== "PAGE" && cur.type !== "DOCUMENT") {
-    var bb = cur.absoluteBoundingBox;
-    if (bb && cx >= bb.x && cx <= bb.x + bb.width && cy >= bb.y && cy <= bb.y + bb.height) {
-      best = cur; // keep updating — we want the outermost that still contains the center
-    }
-    cur = cur.parent;
+  var children = figma.currentPage.children;
+
+  // Find where this text node sits in the page's child list (-1 if it's nested).
+  var selfIdx = -1;
+  for (var i = 0; i < children.length; i++) {
+    if (children[i] === textNode) { selfIdx = i; break; }
   }
-  return best;
+
+  // Search backwards from the node below the text (lower z-order = smaller index).
+  var limit = selfIdx >= 0 ? selfIdx : children.length;
+  for (var si = limit - 1; si >= 0; si--) {
+    var sib = children[si];
+    if (!sib.visible) continue;
+    var bb = sib.absoluteBoundingBox;
+    if (!bb) continue;
+    if (cx >= bb.x && cx <= bb.x + bb.width && cy >= bb.y && cy <= bb.y + bb.height) {
+      return sib;
+    }
+  }
+  return null; // nothing below — white canvas
+}
+
+// Returns the node to export for background sampling:
+// - nearest filled ancestor (handles text inside coloured frames/components), or
+// - nearest overlapping page-level sibling (handles text placed directly on canvas).
+function getBackgroundNode(textNode) {
+  var filled = getNearestFilledAncestor(textNode);
+  if (filled) return filled;
+  return getPageBackgroundNode(textNode);
 }
 
 // ─── Pixel sampling ───────────────────────────────────────────────────────────
 
-// Export `frame` with all its text nodes hidden, then ask the UI to sample
-// pixel colors at each candidate's center. Returns an array of { r, g, b }.
-async function processFrameGroup(frame, candidates) {
-  var frameBounds = frame.absoluteBoundingBox;
+// Export `bgNode`, hiding any text that is a descendant of it, then ask the UI
+// to sample pixel colors at each candidate text node's center.
+async function processGroup(bgNode, candidates) {
+  var bgBounds = bgNode.absoluteBoundingBox;
 
-  // Hide all text in the frame so we sample pure background pixels
-  var allText = frame.findAll(function (n) { return n.type === "TEXT"; });
-  var savedVisibility = allText.map(function (n) { return n.visible; });
-  allText.forEach(function (n) { n.visible = false; });
+  // Hide descendant text so we sample pure background pixels.
+  // (Text nodes that are siblings/ancestors of bgNode don't need hiding.)
+  var textDescendants = bgNode.findAll ? bgNode.findAll(function (n) { return n.type === "TEXT"; }) : [];
+  var savedVis = textDescendants.map(function (n) { return n.visible; });
+  textDescendants.forEach(function (n) { n.visible = false; });
 
   var imageBytes;
   try {
-    imageBytes = await frame.exportAsync({ format: "PNG", scale: 1 });
+    imageBytes = await bgNode.exportAsync({ format: "PNG", scale: 1 });
   } finally {
-    allText.forEach(function (n, i) { n.visible = savedVisibility[i]; });
+    textDescendants.forEach(function (n, i) { n.visible = savedVis[i]; });
   }
 
-  // Build a sample point at the center of each candidate's bounding box
   var points = candidates.map(function (c) {
     var b = c.node.absoluteBoundingBox;
     if (!b) return { x: 0, y: 0 };
     return {
-      x: Math.round(b.x - frameBounds.x + b.width / 2),
-      y: Math.round(b.y - frameBounds.y + b.height / 2),
+      x: Math.round(b.x - bgBounds.x + b.width / 2),
+      y: Math.round(b.y - bgBounds.y + b.height / 2),
     };
   });
 
@@ -274,43 +263,41 @@ async function scan() {
   var candidates = [];
   for (var i = 0; i < allTextNodes.length; i++) {
     var node = allTextNodes[i];
-    if (isEffectivelyHidden(node)) { checked++; continue; }
-    if (node.fontSize === figma.mixed)        { skipped++; continue; }
+    if (isEffectivelyHidden(node))       { checked++; continue; }
+    if (node.fontSize === figma.mixed)   { skipped++; continue; }
     var fgResult = getTextColor(node);
-    if (fgResult === null)   { checked++; continue; } // no fill → decoration
-    if (fgResult === "skip") { skipped++; continue; } // gradient/image fill
+    if (fgResult === null)               { checked++; continue; } // no fill → decoration
+    if (fgResult === "skip")             { skipped++; continue; } // gradient/image fill
     candidates.push({ node: node, fgResult: fgResult });
   }
 
-  // Group candidates by their top-level frame so we export each frame once
-  var frameGroups = {};
-  var noFrameCandidates = [];
+  // Group candidates by background node so each background is exported only once.
+  var bgGroups = {};
+  var whiteCandidates = []; // no background found → assume white canvas
   for (var j = 0; j < candidates.length; j++) {
     var c = candidates[j];
-    var frame = getExportFrame(c.node);
-    if (!frame) { noFrameCandidates.push(c); continue; }
-    if (!frameGroups[frame.id]) frameGroups[frame.id] = { frame: frame, candidates: [] };
-    frameGroups[frame.id].candidates.push(c);
+    var bgNode = getBackgroundNode(c.node);
+    if (!bgNode) { whiteCandidates.push(c); continue; }
+    if (!bgGroups[bgNode.id]) bgGroups[bgNode.id] = { bgNode: bgNode, candidates: [] };
+    bgGroups[bgNode.id].candidates.push(c);
   }
 
-  // Process each frame group: hide text, export once, sample all positions
-  var groupIds = Object.keys(frameGroups);
+  // Process each background group: export once, sample all positions
+  var groupIds = Object.keys(bgGroups);
   for (var k = 0; k < groupIds.length; k++) {
-    var group = frameGroups[groupIds[k]];
-    var results = await processFrameGroup(group.frame, group.candidates);
+    var group = bgGroups[groupIds[k]];
+    var results = await processGroup(group.bgNode, group.candidates);
     for (var m = 0; m < results.length; m++) {
       checked++;
       if (results[m] !== null) issues.push(results[m]);
     }
   }
 
-  // Nodes not inside any frame: sample background from overlapping page-level siblings
-  for (var n = 0; n < noFrameCandidates.length; n++) {
-    var nc = noFrameCandidates[n];
+  // Fallback: text with no detectable background → assume white canvas
+  for (var n = 0; n < whiteCandidates.length; n++) {
+    var wc = whiteCandidates[n];
     checked++;
-    var bg = getPageBackground(nc.node);
-    if (bg === "skip") { checked--; skipped++; continue; }
-    var r = computeContrastResult(nc.node, nc.fgResult, bg);
+    var r = computeContrastResult(wc.node, wc.fgResult, { r: 1, g: 1, b: 1 });
     if (r !== null) issues.push(r);
   }
 
