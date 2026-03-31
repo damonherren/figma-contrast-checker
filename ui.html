@@ -331,7 +331,13 @@
           var x = Math.max(0, Math.min(Math.round(p.x), img.width - 1));
           var y = Math.max(0, Math.min(Math.round(p.y), img.height - 1));
           var d = ctx.getImageData(x, y, 1, 1).data;
-          return { r: d[0] / 255, g: d[1] / 255, b: d[2] / 255 };
+          // Composite over white to handle semi-transparent or transparent pixels.
+          var a = d[3] / 255;
+          return {
+            r: (d[0] / 255) * a + (1 - a),
+            g: (d[1] / 255) * a + (1 - a),
+            b: (d[2] / 255) * a + (1 - a),
+          };
         });
         URL.revokeObjectURL(url);
         parent.postMessage({ pluginMessage: { type: "pixelSampleResults", colors: colors } }, "*");

@@ -136,18 +136,23 @@ function getPageBackgroundNode(textNode) {
   return null; // nothing below — white canvas
 }
 
-// Returns the node to export for background pixel sampling.
-//
-// Strategy: walk up from the text node and return the nearest ancestor that
-// (a) has at least one visible fill, AND
-// (b) whose absoluteBoundingBox actually contains the text center.
-//
-// Requiring (b) ensures the sampling coordinates are always within the exported
-// image — avoiding the clamping artefact where overflow text gets the edge pixel.
-//
-// If no such ancestor exists (text is directly on the canvas or overflows every
-// filled frame), fall back to the nearest overlapping page-level sibling.
-function getBackgroundNode(textNode) {
+// Returns the outermost non-page ancestor frame/group that contains the text node.
+// This is the best node to export because it captures sibling layers (e.g. a colored
+// rectangle behind a component) that a nearest-filled-ancestor approach would miss.
+function getExportFrame(textNode) {
+  var result = null;
+  var cur = textNode.parent;
+  while (cur && cur.type !== "PAGE" && cur.type !== "DOCUMENT") {
+    result = cur;
+    cur = cur.parent;
+  }
+  return result;
+}
+
+// Returns the nearest ancestor that (a) has a visible fill AND (b) contains the
+// text center within its absoluteBoundingBox. Used as a fallback when the text
+// overflows the top-level export frame (so pixel coordinates would be out of bounds).
+function getNearestFilledAncestor(textNode) {
   var textBounds = textNode.absoluteBoundingBox;
   if (!textBounds) return null;
   var cx = textBounds.x + textBounds.width / 2;
@@ -165,6 +170,34 @@ function getBackgroundNode(textNode) {
       }
     }
     cur = cur.parent;
+  }
+  return null;
+}
+
+// Returns the background node to export for a text node, plus whether the
+// text center is in-bounds for that node.
+// Strategy:
+//   1. Try the outermost containing frame (captures sibling-layer backgrounds).
+//   2. If the text center is outside that frame's bounds (overflow text), fall
+//      back to nearest filled ancestor that actually contains the text center.
+//   3. If neither exists, fall back to nearest overlapping page-level sibling.
+// Returns null if no background can be found (white canvas assumed).
+function getBackgroundNode(textNode) {
+  var textBounds = textNode.absoluteBoundingBox;
+  if (!textBounds) return null;
+  var cx = textBounds.x + textBounds.width / 2;
+  var cy = textBounds.y + textBounds.height / 2;
+
+  var exportFrame = getExportFrame(textNode);
+  if (exportFrame) {
+    var bb = exportFrame.absoluteBoundingBox;
+    if (bb && cx >= bb.x && cx <= bb.x + bb.width && cy >= bb.y && cy <= bb.y + bb.height) {
+      // Text center is within the frame — export the full frame for best accuracy.
+      return exportFrame;
+    }
+    // Text overflows the frame. Fall back to nearest filled ancestor.
+    var filled = getNearestFilledAncestor(textNode);
+    if (filled) return filled;
   }
 
   return getPageBackgroundNode(textNode);
