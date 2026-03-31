@@ -154,15 +154,25 @@ function getPageBackground(textNode) {
 
 // ─── Frame traversal ──────────────────────────────────────────────────────────
 
-// Returns the top-level frame/component ancestor of a node, or null if the node
-// sits directly on the page or has no bounding box.
-function getTopLevelFrame(node) {
-  var cur = node;
-  while (cur.parent && cur.parent.type !== "PAGE" && cur.parent.type !== "DOCUMENT") {
+// Returns the outermost ancestor frame whose bounds contain the text node's center,
+// or null if the node sits directly on the page or no enclosing frame contains it.
+// Using the outermost *containing* frame (rather than the absolute top-level frame)
+// handles overflow: text that spills below a clipped frame still gets sampled correctly.
+function getExportFrame(node) {
+  var textBounds = node.absoluteBoundingBox;
+  if (!textBounds) return null;
+  var cx = textBounds.x + textBounds.width / 2;
+  var cy = textBounds.y + textBounds.height / 2;
+  var best = null;
+  var cur = node.parent;
+  while (cur && cur.type !== "PAGE" && cur.type !== "DOCUMENT") {
+    var bb = cur.absoluteBoundingBox;
+    if (bb && cx >= bb.x && cx <= bb.x + bb.width && cy >= bb.y && cy <= bb.y + bb.height) {
+      best = cur; // keep updating — we want the outermost that still contains the center
+    }
     cur = cur.parent;
   }
-  if (cur === node || !cur.absoluteBoundingBox) return null;
-  return cur;
+  return best;
 }
 
 // ─── Pixel sampling ───────────────────────────────────────────────────────────
@@ -277,7 +287,7 @@ async function scan() {
   var noFrameCandidates = [];
   for (var j = 0; j < candidates.length; j++) {
     var c = candidates[j];
-    var frame = getTopLevelFrame(c.node);
+    var frame = getExportFrame(c.node);
     if (!frame) { noFrameCandidates.push(c); continue; }
     if (!frameGroups[frame.id]) frameGroups[frame.id] = { frame: frame, candidates: [] };
     frameGroups[frame.id].candidates.push(c);
