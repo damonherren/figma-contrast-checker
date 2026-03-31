@@ -106,25 +106,6 @@ function getTextColor(node) {
 
 // ─── Background node detection ────────────────────────────────────────────────
 
-// Returns the nearest ancestor of `node` that has at least one visible fill,
-// or null if none found before reaching the page.
-// Exporting this node (with text hidden) and sampling the pixel at the text's
-// center gives the true visual background — unaffected by sibling overlays in
-// larger parent frames.
-function getNearestFilledAncestor(node) {
-  var cur = node.parent;
-  while (cur && cur.type !== "PAGE" && cur.type !== "DOCUMENT") {
-    var f = cur.fills;
-    if (f && f !== figma.mixed && Array.isArray(f)) {
-      for (var i = f.length - 1; i >= 0; i--) {
-        if (f[i].visible !== false) return cur;
-      }
-    }
-    cur = cur.parent;
-  }
-  return null;
-}
-
 // For text with no filled ancestor (sitting directly on the canvas), find the
 // nearest overlapping page-level node below it in z-order.
 // In the Figma API children[] is back-to-front (index 0 = furthest back).
@@ -155,12 +136,37 @@ function getPageBackgroundNode(textNode) {
   return null; // nothing below — white canvas
 }
 
-// Returns the node to export for background sampling:
-// - nearest filled ancestor (handles text inside coloured frames/components), or
-// - nearest overlapping page-level sibling (handles text placed directly on canvas).
+// Returns the node to export for background pixel sampling.
+//
+// Strategy: walk up from the text node and return the nearest ancestor that
+// (a) has at least one visible fill, AND
+// (b) whose absoluteBoundingBox actually contains the text center.
+//
+// Requiring (b) ensures the sampling coordinates are always within the exported
+// image — avoiding the clamping artefact where overflow text gets the edge pixel.
+//
+// If no such ancestor exists (text is directly on the canvas or overflows every
+// filled frame), fall back to the nearest overlapping page-level sibling.
 function getBackgroundNode(textNode) {
-  var filled = getNearestFilledAncestor(textNode);
-  if (filled) return filled;
+  var textBounds = textNode.absoluteBoundingBox;
+  if (!textBounds) return null;
+  var cx = textBounds.x + textBounds.width / 2;
+  var cy = textBounds.y + textBounds.height / 2;
+
+  var cur = textNode.parent;
+  while (cur && cur.type !== "PAGE" && cur.type !== "DOCUMENT") {
+    var bb = cur.absoluteBoundingBox;
+    if (bb && cx >= bb.x && cx <= bb.x + bb.width && cy >= bb.y && cy <= bb.y + bb.height) {
+      var f = cur.fills;
+      if (f && f !== figma.mixed && Array.isArray(f)) {
+        for (var i = f.length - 1; i >= 0; i--) {
+          if (f[i].visible !== false) return cur;
+        }
+      }
+    }
+    cur = cur.parent;
+  }
+
   return getPageBackgroundNode(textNode);
 }
 
