@@ -3,13 +3,20 @@
 
 figma.showUI(__html__, { width: 520, height: 640, title: "Contrast Checker" });
 
-figma.ui.onmessage = function (msg) {
+var pendingPixelResolve = null;
+
+figma.ui.onmessage = async function (msg) {
   if (msg.type === "scan") {
     try {
-      var r = scan();
+      var r = await scan();
       figma.ui.postMessage({ type: "results", issues: r.issues, checked: r.checked, skipped: r.skipped });
     } catch (err) {
       figma.ui.postMessage({ type: "error", message: String(err) });
+    }
+  } else if (msg.type === "pixelSampleResults") {
+    if (pendingPixelResolve) {
+      pendingPixelResolve(msg.colors);
+      pendingPixelResolve = null;
     }
   } else if (msg.type === "select") {
     var node = figma.getNodeById(msg.nodeId);
@@ -84,7 +91,7 @@ function breadcrumb(node) {
 // ─── Color extraction ─────────────────────────────────────────────────────────
 
 // Returns { color, alpha } for the topmost visible solid fill on a text node,
-// or null (no fills → treat as decoration), or the string "skip" (non-solid fill).
+// null (no fills → treat as decoration), or "skip" (non-solid fill).
 function getTextColor(node) {
   if (!("fills" in node) || node.fills === figma.mixed || !Array.isArray(node.fills)) return null;
   var nodeAlpha = node.opacity !== undefined ? node.opacity : 1;
@@ -97,97 +104,69 @@ function getTextColor(node) {
   return null;
 }
 
-// Walk up from the text node looking for the nearest visible background.
-// At each level: check the nearest sibling below first, then the parent's own fill.
-// Returns { color } or "skip" if a non-solid fill is encountered.
-function getBackgroundColor(textNode) {
-  var cur = textNode;
-  var parent = textNode.parent;
+// ─── Frame traversal ──────────────────────────────────────────────────────────
 
-  while (parent && parent.type !== "DOCUMENT") {
+// Returns the top-level frame/component ancestor of a node, or null if the node
+// sits directly on the page or has no bounding box.
+function getTopLevelFrame(node) {
+  var cur = node;
+  while (cur.parent && cur.parent.type !== "PAGE" && cur.parent.type !== "DOCUMENT") {
+    cur = cur.parent;
+  }
+  if (cur === node || !cur.absoluteBoundingBox) return null;
+  return cur;
+}
 
-    // 1. Find the nearest visible sibling below `cur` in this parent.
-    //    children[] is bottom→top (index 0 = lowest layer).
-    if (parent.children) {
-      var curIdx = -1;
-      for (var i = 0; i < parent.children.length; i++) {
-        if (parent.children[i] === cur) { curIdx = i; break; }
-      }
-      var textBounds = textNode.absoluteBoundingBox;
-      for (var si = curIdx - 1; si >= 0; si--) {
-        var sib = parent.children[si];
-        if (!sib.visible) continue;
-        // Skip siblings that don't overlap the text's position
-        if (!boundsOverlap(sib.absoluteBoundingBox, textBounds)) continue;
-        // Overlapping visible sibling — check its fill
-        var sibFill = topSolidFill(sib);
-        if (sibFill === "skip") return "skip";
-        if (sibFill !== null) {
-          var a = sibFill.opacity * (sib.opacity !== undefined ? sib.opacity : 1);
-          return { color: composite(sibFill.color, a, { r: 1, g: 1, b: 1 }) };
-        }
-        // Overlapping and visible but no fills — keep looking below
-      }
-    }
+// ─── Pixel sampling ───────────────────────────────────────────────────────────
 
-    // 2. Parent's own fill
-    var parentFill = topSolidFill(parent);
-    if (parentFill === "skip") return "skip";
-    if (parentFill !== null) {
-      var pa = parentFill.opacity * (parent.opacity !== undefined ? parent.opacity : 1);
-      return { color: composite(parentFill.color, pa, { r: 1, g: 1, b: 1 }) };
-    }
+// Export `frame` with all its text nodes hidden, then ask the UI to sample
+// pixel colors at each candidate's center. Returns an array of { r, g, b }.
+async function processFrameGroup(frame, candidates) {
+  var frameBounds = frame.absoluteBoundingBox;
 
-    // Nothing at this level — go up
-    cur = parent;
-    parent = parent.parent;
+  // Hide all text in the frame so we sample pure background pixels
+  var allText = frame.findAll(function (n) { return n.type === "TEXT"; });
+  var savedVisibility = allText.map(function (n) { return n.visible; });
+  allText.forEach(function (n) { n.visible = false; });
+
+  var imageBytes;
+  try {
+    imageBytes = await frame.exportAsync({ format: "PNG", scale: 1 });
+  } finally {
+    allText.forEach(function (n, i) { n.visible = savedVisibility[i]; });
   }
 
-  return { color: { r: 1, g: 1, b: 1 } }; // white canvas default
+  // Build a sample point at the center of each candidate's bounding box
+  var points = candidates.map(function (c) {
+    var b = c.node.absoluteBoundingBox;
+    if (!b) return { x: 0, y: 0 };
+    return {
+      x: Math.round(b.x - frameBounds.x + b.width / 2),
+      y: Math.round(b.y - frameBounds.y + b.height / 2),
+    };
+  });
+
+  var bgColors = await requestPixelSamples(imageBytes, points);
+
+  return candidates.map(function (c, i) {
+    return computeContrastResult(c.node, c.fgResult, bgColors[i]);
+  });
 }
 
-// Returns true if two bounding boxes overlap.
-function boundsOverlap(a, b) {
-  if (!a || !b) return true; // no bounds info — assume overlap
-  return !(a.x + a.width  <= b.x ||
-           b.x + b.width  <= a.x ||
-           a.y + a.height <= b.y ||
-           b.y + b.height <= a.y);
+function requestPixelSamples(imageBytes, points) {
+  return new Promise(function (resolve) {
+    pendingPixelResolve = resolve;
+    figma.ui.postMessage({
+      type: "pixelSamples",
+      imageData: Array.from(imageBytes),
+      points: points,
+    });
+  });
 }
 
-// Returns { color, opacity } for the topmost visible fill on a node,
-// "skip" if the topmost visible fill is non-solid, or null if no visible fills.
-function topSolidFill(node) {
-  if (!("fills" in node) || node.fills === figma.mixed || !Array.isArray(node.fills)) return null;
-  // fills[] is bottom→top; iterate in reverse to get topmost first
-  for (var i = node.fills.length - 1; i >= 0; i--) {
-    var f = node.fills[i];
-    if (f.visible === false) continue;
-    if (f.type !== "SOLID") return "skip";
-    return { color: f.color, opacity: f.opacity !== undefined ? f.opacity : 1 };
-  }
-  return null;
-}
+// ─── Contrast computation ─────────────────────────────────────────────────────
 
-// ─── Per-node check ───────────────────────────────────────────────────────────
-
-function checkTextNode(node) {
-  // WCAG exemptions: invisible / zero-opacity nodes
-  if (!node.visible || node.opacity === 0) return null;
-
-  // Skip nodes with per-character font size variance (too ambiguous to check as a unit)
-  if (node.fontSize === figma.mixed) return "skip";
-
-  var fgResult = getTextColor(node);
-  if (fgResult === null) return null;   // no fills → decoration
-  if (fgResult === "skip") return "skip";
-
-  var bgResult = getBackgroundColor(node);
-  if (bgResult === "skip") return "skip";
-
-  var bg = bgResult.color;
-
-  // If text fill is semi-transparent, composite it over the background first
+function computeContrastResult(node, fgResult, bg) {
   var effectiveFg = fgResult.alpha < 0.999
     ? composite(fgResult.color, fgResult.alpha, bg)
     : fgResult.color;
@@ -219,14 +198,51 @@ function checkTextNode(node) {
 
 // ─── Scan ─────────────────────────────────────────────────────────────────────
 
-function scan() {
+async function scan() {
   var issues = [], checked = 0, skipped = 0;
-  var nodes = figma.currentPage.findAll(function (n) { return n.type === "TEXT"; });
-  for (var i = 0; i < nodes.length; i++) {
-    var r = checkTextNode(nodes[i]);
-    if (r === null)   { checked++; }
-    else if (r === "skip") { skipped++; }
-    else              { checked++; issues.push(r); }
+  var allTextNodes = figma.currentPage.findAll(function (n) { return n.type === "TEXT"; });
+
+  // First pass: filter nodes and resolve foreground colors (all synchronous)
+  var candidates = [];
+  for (var i = 0; i < allTextNodes.length; i++) {
+    var node = allTextNodes[i];
+    if (!node.visible || node.opacity === 0) { checked++; continue; }
+    if (node.fontSize === figma.mixed)        { skipped++; continue; }
+    var fgResult = getTextColor(node);
+    if (fgResult === null)   { checked++; continue; } // no fill → decoration
+    if (fgResult === "skip") { skipped++; continue; } // gradient/image fill
+    candidates.push({ node: node, fgResult: fgResult });
   }
+
+  // Group candidates by their top-level frame so we export each frame once
+  var frameGroups = {};
+  var noFrameCandidates = [];
+  for (var j = 0; j < candidates.length; j++) {
+    var c = candidates[j];
+    var frame = getTopLevelFrame(c.node);
+    if (!frame) { noFrameCandidates.push(c); continue; }
+    if (!frameGroups[frame.id]) frameGroups[frame.id] = { frame: frame, candidates: [] };
+    frameGroups[frame.id].candidates.push(c);
+  }
+
+  // Process each frame group: hide text, export once, sample all positions
+  var groupIds = Object.keys(frameGroups);
+  for (var k = 0; k < groupIds.length; k++) {
+    var group = frameGroups[groupIds[k]];
+    var results = await processFrameGroup(group.frame, group.candidates);
+    for (var m = 0; m < results.length; m++) {
+      checked++;
+      if (results[m] !== null) issues.push(results[m]);
+    }
+  }
+
+  // Nodes not inside any frame: assume white canvas background
+  for (var n = 0; n < noFrameCandidates.length; n++) {
+    var nc = noFrameCandidates[n];
+    checked++;
+    var r = computeContrastResult(nc.node, nc.fgResult, { r: 1, g: 1, b: 1 });
+    if (r !== null) issues.push(r);
+  }
+
   return { issues: issues, checked: checked, skipped: skipped };
 }
