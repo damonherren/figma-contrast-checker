@@ -104,6 +104,54 @@ function getTextColor(node) {
   return null;
 }
 
+// ─── Page-level background detection ─────────────────────────────────────────
+
+// Returns true if two bounding boxes overlap.
+function boundsOverlap(a, b) {
+  if (!a || !b) return true;
+  return !(a.x + a.width  <= b.x ||
+           b.x + b.width  <= a.x ||
+           a.y + a.height <= b.y ||
+           b.y + b.height <= a.y);
+}
+
+// Returns { color, opacity } for the topmost visible solid fill on a node,
+// "skip" if the topmost visible fill is non-solid, or null if no visible fills.
+function topSolidFill(node) {
+  if (!("fills" in node) || node.fills === figma.mixed || !Array.isArray(node.fills)) return null;
+  for (var i = node.fills.length - 1; i >= 0; i--) {
+    var f = node.fills[i];
+    if (f.visible === false) continue;
+    if (f.type !== "SOLID") return "skip";
+    return { color: f.color, opacity: f.opacity !== undefined ? f.opacity : 1 };
+  }
+  return null;
+}
+
+// For text nodes sitting directly on the page (no parent frame), scan overlapping
+// page-level siblings below the text in z-order to find the background color.
+// Returns { r, g, b } or "skip" if a non-solid fill is encountered.
+function getPageBackground(textNode) {
+  var children = figma.currentPage.children;
+  var textBounds = textNode.absoluteBoundingBox;
+  var curIdx = -1;
+  for (var i = 0; i < children.length; i++) {
+    if (children[i] === textNode) { curIdx = i; break; }
+  }
+  for (var si = curIdx - 1; si >= 0; si--) {
+    var sib = children[si];
+    if (!sib.visible) continue;
+    if (!boundsOverlap(sib.absoluteBoundingBox, textBounds)) continue;
+    var sibFill = topSolidFill(sib);
+    if (sibFill === "skip") return "skip";
+    if (sibFill !== null) {
+      var a = sibFill.opacity * (sib.opacity !== undefined ? sib.opacity : 1);
+      return composite(sibFill.color, a, { r: 1, g: 1, b: 1 });
+    }
+  }
+  return { r: 1, g: 1, b: 1 }; // white canvas default
+}
+
 // ─── Frame traversal ──────────────────────────────────────────────────────────
 
 // Returns the top-level frame/component ancestor of a node, or null if the node
@@ -246,11 +294,13 @@ async function scan() {
     }
   }
 
-  // Nodes not inside any frame: assume white canvas background
+  // Nodes not inside any frame: sample background from overlapping page-level siblings
   for (var n = 0; n < noFrameCandidates.length; n++) {
     var nc = noFrameCandidates[n];
     checked++;
-    var r = computeContrastResult(nc.node, nc.fgResult, { r: 1, g: 1, b: 1 });
+    var bg = getPageBackground(nc.node);
+    if (bg === "skip") { checked--; skipped++; continue; }
+    var r = computeContrastResult(nc.node, nc.fgResult, bg);
     if (r !== null) issues.push(r);
   }
 
